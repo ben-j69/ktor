@@ -6,12 +6,13 @@ package io.ktor.network.sockets
 
 import io.ktor.network.selector.*
 import io.ktor.network.util.*
-import kotlinx.coroutines.*
+import io.ktor.util.date.*
 import io.ktor.utils.io.*
 import io.ktor.utils.io.ByteChannel
 import io.ktor.utils.io.core.*
 import io.ktor.utils.io.nio.*
 import io.ktor.utils.io.pool.*
+import kotlinx.coroutines.*
 import java.nio.*
 import java.nio.channels.*
 
@@ -26,19 +27,24 @@ internal fun CoroutineScope.attachForReadingImpl(
     val buffer = pool.borrow()
     return writer(Dispatchers.Unconfined + CoroutineName("cio-from-nio-reader"), channel) {
         try {
+            val timeout = if (socketOptions?.socketTimeout != null) {
+                startTimeout("reading", socketOptions.socketTimeout) { channel.cancel(SocketTimeoutException()) }
+            } else {
+                null
+            }
+
             while (true) {
                 var rc = 0
 
-                withSocketTimeout(socketOptions?.socketTimeout ?: INFINITE_TIMEOUT_MS) {
-                    do {
-                        rc = nioChannel.read(buffer)
-                        if (rc == 0) {
-                            channel.flush()
-                            selectable.interestOp(SelectInterest.READ, true)
-                            selector.select(selectable, SelectInterest.READ)
-                        }
-                    } while (rc == 0)
-                }
+                do {
+                    timeout?.lastActivityTime = getTimeMillis()
+                    rc = nioChannel.read(buffer)
+                    if (rc == 0) {
+                        channel.flush()
+                        selectable.interestOp(SelectInterest.READ, true)
+                        selector.select(selectable, SelectInterest.READ)
+                    }
+                } while (rc == 0)
 
                 if (rc == -1) {
                     channel.close()
@@ -50,6 +56,7 @@ internal fun CoroutineScope.attachForReadingImpl(
                     buffer.clear()
                 }
             }
+            timeout?.cancel()
         } finally {
             pool.recycle(buffer)
             if (nioChannel is SocketChannel) {
@@ -73,28 +80,32 @@ internal fun CoroutineScope.attachForReadingDirectImpl(
     try {
         selectable.interestOp(SelectInterest.READ, false)
 
+        val timeout = if (socketOptions?.socketTimeout != null) {
+            startTimeout("reading-direct", socketOptions.socketTimeout) { channel.cancel(SocketTimeoutException()) }
+        } else {
+            null
+        }
         channel.writeSuspendSession {
             while (true) {
                 var rc = 0
 
-                withSocketTimeout(socketOptions?.socketTimeout ?: INFINITE_TIMEOUT_MS) {
-                    do {
-                        val buffer = request(1)
-                        if (buffer == null) {
-                            if (channel.isClosedForWrite) break
-                            channel.flush()
-                            tryAwait(1)
-                            continue
-                        }
+                do {
+                    timeout?.lastActivityTime = getTimeMillis()
+                    val buffer = request(1)
+                    if (buffer == null) {
+                        if (channel.isClosedForWrite) break
+                        channel.flush()
+                        tryAwait(1)
+                        continue
+                    }
 
-                        rc = nioChannel.read(buffer)
-                        if (rc == 0) {
-                            channel.flush()
-                            selectable.interestOp(SelectInterest.READ, true)
-                            selector.select(selectable, SelectInterest.READ)
-                        }
-                    } while (rc == 0)
-                }
+                    rc = nioChannel.read(buffer)
+                    if (rc == 0) {
+                        channel.flush()
+                        selectable.interestOp(SelectInterest.READ, true)
+                        selector.select(selectable, SelectInterest.READ)
+                    }
+                } while (rc == 0)
 
                 if (rc == -1) {
                     break
@@ -104,6 +115,7 @@ internal fun CoroutineScope.attachForReadingDirectImpl(
             }
         }
 
+        timeout?.cancel()
         channel.close()
     } finally {
         if (nioChannel is SocketChannel) {

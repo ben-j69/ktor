@@ -6,6 +6,7 @@ package io.ktor.network.sockets
 
 import io.ktor.network.selector.*
 import io.ktor.network.util.*
+import io.ktor.util.date.*
 import kotlinx.coroutines.*
 import io.ktor.utils.io.*
 import io.ktor.utils.io.ByteChannel
@@ -26,6 +27,12 @@ internal fun CoroutineScope.attachForWritingImpl(
 
     return reader(Dispatchers.Unconfined + CoroutineName("cio-to-nio-writer"), channel) {
         try {
+            val timeout = if (socketOptions?.socketTimeout != null) {
+                startTimeout("writing", socketOptions.socketTimeout) { channel.cancel(SocketTimeoutException()) }
+            } else {
+                null
+            }
+
             while (true) {
                 buffer.clear()
                 if (channel.readAvailable(buffer) == -1) {
@@ -36,19 +43,19 @@ internal fun CoroutineScope.attachForWritingImpl(
                 while (buffer.hasRemaining()) {
                     var rc: Int
 
-                    withSocketTimeout(socketOptions?.socketTimeout ?: INFINITE_TIMEOUT_MS) {
-                        do {
-                            rc = nioChannel.write(buffer)
-                            if (rc == 0) {
-                                selectable.interestOp(SelectInterest.WRITE, true)
-                                selector.select(selectable, SelectInterest.WRITE)
-                            }
-                        } while (buffer.hasRemaining() && rc == 0)
-                    }
+                    do {
+                        timeout?.lastActivityTime = getTimeMillis()
+                        rc = nioChannel.write(buffer)
+                        if (rc == 0) {
+                            selectable.interestOp(SelectInterest.WRITE, true)
+                            selector.select(selectable, SelectInterest.WRITE)
+                        }
+                    } while (buffer.hasRemaining() && rc == 0)
 
                     selectable.interestOp(SelectInterest.WRITE, false)
                 }
             }
+            timeout?.cancel()
         } finally {
             pool.recycle(buffer)
             if (nioChannel is SocketChannel) {
@@ -72,6 +79,12 @@ internal fun CoroutineScope.attachForWritingDirectImpl(
     selectable.interestOp(SelectInterest.WRITE, false)
     try {
         channel.lookAheadSuspend {
+            val timeout = if (socketOptions?.socketTimeout != null) {
+                startTimeout("writing-direct", socketOptions?.socketTimeout) { channel.cancel(SocketTimeoutException()) }
+            } else {
+                null
+            }
+
             while (true) {
                 val buffer = request(0, 1)
                 if (buffer == null) {
@@ -83,19 +96,19 @@ internal fun CoroutineScope.attachForWritingDirectImpl(
                 while (buffer.hasRemaining()) {
                     var rc = 0
 
-                    withSocketTimeout(socketOptions?.socketTimeout ?: INFINITE_TIMEOUT_MS) {
-                        do {
-                            rc = nioChannel.write(buffer)
-                            if (rc == 0) {
-                                selectable.interestOp(SelectInterest.WRITE, true)
-                                selector.select(selectable, SelectInterest.WRITE)
-                            }
-                        } while (buffer.hasRemaining() && rc == 0)
-                    }
+                    do {
+                        timeout?.lastActivityTime = getTimeMillis()
+                        rc = nioChannel.write(buffer)
+                        if (rc == 0) {
+                            selectable.interestOp(SelectInterest.WRITE, true)
+                            selector.select(selectable, SelectInterest.WRITE)
+                        }
+                    } while (buffer.hasRemaining() && rc == 0)
 
                     consumed(rc)
                 }
             }
+            timeout?.cancel()
         }
     } finally {
         selectable.interestOp(SelectInterest.WRITE, false)
